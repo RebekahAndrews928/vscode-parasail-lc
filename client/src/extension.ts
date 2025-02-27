@@ -6,12 +6,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as glob from 'glob';
 import { LibraryView, Library } from './libraryView';
-
 
 import {
 	LanguageClient,
 	LanguageClientOptions,
+	NotificationType,
 	ServerOptions,
 	TransportKind
 } from 'vscode-languageclient/node';
@@ -77,55 +78,128 @@ export function activate(context: vscode.ExtensionContext) {
             placeHolder: '/path/to/library',
         });
 
-        if (libraryPath) {
-			// check if path exists
-			if (fs.existsSync(libraryPath)) {
-				const libraryName = path.basename(libraryPath);
-                libraryView.addLibraryPath({ name: libraryName, path: libraryPath });
-			
-				// send notification to lsp about added library
-				client.sendNotification('parasail/addLibrary', {name: libraryName, path: libraryPath});
-			
-				// show success message
-				vscode.window.showInformationMessage(`Library '${libraryName}' added.`);
-			} else{
-				// show error message if path does not exist
-				vscode.window.showErrorMessage(`The path ${libraryPath} does not exist.`);
+		// if no path entered, return
+		if (!libraryPath) {
+			vscode.window.showErrorMessage('No path entered.');
+			return;
+		}
+
+		// check if the library path is already added
+		if ((await libraryView.getChildren()).find(lib => lib.path === libraryPath)) {
+			vscode.window.showErrorMessage(`Library path ${libraryPath} already exists.`);
+			return;
+		}
+
+		// if path does not exist, show error message
+		if (!fs.existsSync(libraryPath)) {
+			vscode.window.showErrorMessage(`The path ${libraryPath} does not exist.`);
+			return;
+		}
+
+		// get the library name
+		const libraryName = path.basename(libraryPath);
+		let fileList: string[] = [];
+
+		if (fs.statSync(libraryPath).isFile()) {
+			// if the path is a file
+			fileList.push(libraryPath);
+		}
+		else {
+			// if the path is a directory
+			const pslList = path.join(libraryPath, 'psl_list.json');
+
+			// check if psl_list.json exists
+			// if it does get files in correct order
+			if (fs.existsSync(pslList)) {
+				try {
+					const psl = JSON.parse(fs.readFileSync(pslList, 'utf-8'));
+					if (Array.isArray(psl.files)) {
+						fileList = psl.files.map((file: string) => path.join(libraryPath, file));
+					}
+				} catch (error) {
+					console.error(`Error reading psl_list.json: ${error.message}`);
+					vscode.window.showErrorMessage(`Error reading psl_list.json: ${error.message}`);
+					return;
+				}
+			}
+			else {
+				// if psl_list.json does not exist, get files alphabetically
+				fileList = glob.sync('**/*.psl', { cwd: libraryPath }).map(f => path.join(libraryPath, f));
 			}
 		}
+
+		if (fileList.length === 0) {
+			vscode.window.showErrorMessage(`No .psl files found in ${libraryPath}`);
+			return;
+		}
+
+		// add library to the tree view
+		libraryView.addLibraryPath({ name: libraryName, path: libraryPath });
+
+		// send notification to lsp about added library
+		client.sendNotification('parasail/addLibrary', 
+			{ 
+				name: libraryName, 
+				path: libraryPath, 
+				files: fileList 
+			});
+
+		// show success message
+		vscode.window.showInformationMessage(`Library '${libraryName}' added.`);
     });
 
     // Register command to remove a library
-    const removeLibraryCommand = vscode.commands.registerCommand('parasail.removeLibrary', async (library: Library) => {
-		if (library) {
-			// if library selected from the tree view
-			libraryView.removeLibraryPath(library);
-		
-			// send notification to lsp about removed library
-			client.sendNotification('parasail/removeLibrary', {name: library.name, path: library.path});
-		
-			// show success message
-			vscode.window.showInformationMessage(`Library '${library.name}' removed.`);
-		} else {
-			// if no library selected, ask the user to enter a path
-			const libraryPath = await vscode.window.showInputBox({
-				prompt: 'Enter the path of the library to remove',
-				placeHolder: '/path/to/library',
-			});
-			if (libraryPath) {
-				const matchedLibrary = (await libraryView
-					.getChildren())
-					.find(lib => lib.path === libraryPath);
-				if (matchedLibrary) {
-					// send notification to lsp about removed library
-					client.sendNotification('parasail/removeLibrary', {name: matchedLibrary.name, path: matchedLibrary.path});
+    const removeLibraryCommand = vscode.commands.registerCommand(
+		'parasail.removeLibrary',
+		async (library: Library) => {
+			if (library) {
+				// confirm the user wants to remove the library
+				const confirm = await vscode.window.showWarningMessage(
+					`Are you sure you want to remove '${library.name}'?`,
+					{ modal: true },
+					'Yes',
+					'No'
+				);
+				if (confirm !== 'Yes') return;
+				
+				// if library selected from the tree view
+				libraryView.removeLibraryPath(library);
+			
+				// send notification to lsp about removed library
+				client.sendNotification('parasail/removeLibrary', {name: library.name, path: library.path});
+			
+				// show success message
+				vscode.window.showInformationMessage(`Library '${library.name}' removed.`);
+			} else {
+				// if no library selected, ask the user to enter a path
+				const libraryPath = await vscode.window.showInputBox({
+					prompt: 'Enter the path of the library to remove',
+					placeHolder: '/path/to/library',
+				});
+				if (libraryPath) {
 
-					// remove library from the tree view
-					libraryView.removeLibraryPath(matchedLibrary);
-					vscode.window.showInformationMessage(`Library '${matchedLibrary.name}' removed.`);
-				} else {
-					vscode.window.showErrorMessage(`No library found with the path: ${libraryPath}`);
-				}
+					const matchedLibrary = (await libraryView
+						.getChildren())
+						.find(lib => lib.path === libraryPath);
+					if (matchedLibrary) {
+						// confirm the user wants to remove the library
+						const confirm = await vscode.window.showWarningMessage(
+							`Are you sure you want to remove '${matchedLibrary.name}'?`,
+							{ modal: true },
+							'Yes',
+							'No'
+						);
+						if (confirm !== 'Yes') return;
+
+						// send notification to lsp about removed library
+						client.sendNotification('parasail/removeLibrary', {name: matchedLibrary.name, path: matchedLibrary.path});
+
+						// remove library from the tree view
+						libraryView.removeLibraryPath(matchedLibrary);
+						vscode.window.showInformationMessage(`Library '${matchedLibrary.name}' removed.`);
+					} else {
+						vscode.window.showErrorMessage(`No library found with the path: ${libraryPath}`);
+					}
 		}
 		}
 	});
@@ -143,3 +217,26 @@ export function deactivate(): Thenable<void> | undefined {
 	}
 	return client.stop();
 }
+
+const libraries: { [name: string]: { path: string; files: string[] } } = {};
+
+// create a json file to store the libraries
+const LIBRARY_CONFIG_FILE = path.join(os.homedir(), '.parasail_libraries.json');
+
+// function to save the libraries to the json file
+function saveLibraries() {
+    fs.writeFileSync(LIBRARY_CONFIG_FILE, JSON.stringify(libraries, null, 2));
+}
+
+// We'll have to call loadLibraries() on startup
+function loadLibraries() {
+    if (fs.existsSync(LIBRARY_CONFIG_FILE)) {
+		try {
+			const data = fs.readFileSync(LIBRARY_CONFIG_FILE, 'utf8');
+			Object.assign(libraries, JSON.parse(data));
+		} catch (error) {
+			connection.console.error(`Error reading libraries file: ${error.message}`);
+		}	
+	}
+}
+
