@@ -217,26 +217,3 @@ export function deactivate(): Thenable<void> | undefined {
 	}
 	return client.stop();
 }
-
-const libraries: { [name: string]: { path: string; files: string[] } } = {};
-
-// create a json file to store the libraries
-const LIBRARY_CONFIG_FILE = path.join(os.homedir(), '.parasail_libraries.json');
-
-// function to save the libraries to the json file
-function saveLibraries() {
-    fs.writeFileSync(LIBRARY_CONFIG_FILE, JSON.stringify(libraries, null, 2));
-}
-
-// We'll have to call loadLibraries() on startup
-function loadLibraries() {
-    if (fs.existsSync(LIBRARY_CONFIG_FILE)) {
-		try {
-			const data = fs.readFileSync(LIBRARY_CONFIG_FILE, 'utf8');
-			Object.assign(libraries, JSON.parse(data));
-		} catch (error) {
-			connection.console.error(`Error reading libraries file: ${error.message}`);
-		}	
-	}
-}
-
